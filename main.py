@@ -301,30 +301,90 @@ def get_nws_grid(city):
 # ─── POLYMARKET WEATHER MARKETS ───────────────────────────────────────
 
 def parse_temp_band(question):
+    """
+    Parser temperatur-band fra Polymarket weather question.
+    Understøtter alle kendte formater: °F, °C, 'degrees', og enhedsløse tal.
+    """
     import re
     q = question.lower()
-    # Between X and Y F
-    m = re.search(r'between\s+(-?\d+\.?\d*)[° ]*(?:f|°f)?\s+and\s+(-?\d+\.?\d*)[° ]*(?:°f|f)\b', q)
+
+    def is_fahrenheit(val):
+        # Heuristik: hvis tal > 40 er det sandsynligvis Fahrenheit
+        return val > 40
+
+    # ── Between X and Y °F (fx "between 75°F and 85°F") ──────────
+    m = re.search(r'between\s+(-?\d+\.?\d*)\s*°?f\s+and\s+(-?\d+\.?\d*)\s*°?f', q)
     if m: return float(m.group(1)), float(m.group(2))
-    # Between X and Y C
-    m = re.search(r'between\s+(-?\d+\.?\d*)[° ]*(?:c|°c)?\s+and\s+(-?\d+\.?\d*)[° ]*(?:°c|c)\b', q)
+
+    # ── Between X and Y °C ───────────────────────────────────────
+    m = re.search(r'between\s+(-?\d+\.?\d*)\s*°?c\s+and\s+(-?\d+\.?\d*)\s*°?c', q)
     if m: return c_to_f(float(m.group(1))), c_to_f(float(m.group(2)))
-    # Above X F
-    m = re.search(r'(?:above|over|higher than|>)\s+(-?\d+\.?\d*)[° ]*(?:°f|f)\b', q)
+
+    # ── Between X and Y degrees Fahrenheit/Celsius ───────────────
+    m = re.search(r'between\s+(-?\d+\.?\d*)\s+and\s+(-?\d+\.?\d*)\s*degrees?\s*(fahrenheit|celsius|f\b|c\b)?', q)
+    if m:
+        lo, hi = float(m.group(1)), float(m.group(2))
+        unit = (m.group(3) or "").strip()
+        if unit.startswith("c") and not unit.startswith("f"): return c_to_f(lo), c_to_f(hi)
+        if unit.startswith("f") or "fahrenheit" in q or is_fahrenheit(hi): return lo, hi
+        return c_to_f(lo), c_to_f(hi)
+
+    # ── Between X and Y (enhedsløst) ─────────────────────────────
+    m = re.search(r'between\s+(-?\d+\.?\d*)\s+and\s+(-?\d+\.?\d*)', q)
+    if m:
+        lo, hi = float(m.group(1)), float(m.group(2))
+        return (lo, hi) if is_fahrenheit(hi) else (c_to_f(lo), c_to_f(hi))
+
+    # ── Above/exceed/reach X °F ───────────────────────────────────
+    m = re.search(r'(?:above|over|exceed|reach|higher than|>)\s+(-?\d+\.?\d*)\s*°?f', q)
     if m: return float(m.group(1)), 999.0
-    # Below X F
-    m = re.search(r'(?:below|under|lower than|<)\s+(-?\d+\.?\d*)[° ]*(?:°f|f)\b', q)
-    if m: return -999.0, float(m.group(1))
-    # Above X C
-    m = re.search(r'(?:above|over|higher than|>)\s+(-?\d+\.?\d*)[° ]*(?:°c|c)\b', q)
+
+    # ── Above X °C ───────────────────────────────────────────────
+    m = re.search(r'(?:above|over|exceed|reach|higher than|>)\s+(-?\d+\.?\d*)\s*°?c', q)
     if m: return c_to_f(float(m.group(1))), 999.0
-    # Below X C
-    m = re.search(r'(?:below|under|lower than|<)\s+(-?\d+\.?\d*)[° ]*(?:°c|c)\b', q)
+
+    # ── Above X degrees (enhedsløst) ─────────────────────────────
+    m = re.search(r'(?:above|over|exceed|reach|higher than)\s+(-?\d+\.?\d*)\s*degrees?', q)
+    if m:
+        val = float(m.group(1))
+        return (val, 999.0) if is_fahrenheit(val) else (c_to_f(val), 999.0)
+
+    # ── Below X °F ───────────────────────────────────────────────
+    m = re.search(r'(?:below|under|lower than|<)\s+(-?\d+\.?\d*)\s*°?f', q)
+    if m: return -999.0, float(m.group(1))
+
+    # ── Below X °C ───────────────────────────────────────────────
+    m = re.search(r'(?:below|under|lower than|<)\s+(-?\d+\.?\d*)\s*°?c', q)
     if m: return -999.0, c_to_f(float(m.group(1)))
+
+    # ── Below X degrees ──────────────────────────────────────────
+    m = re.search(r'(?:below|under|lower than)\s+(-?\d+\.?\d*)\s*degrees?', q)
+    if m:
+        val = float(m.group(1))
+        return (-999.0, val) if is_fahrenheit(val) else (-999.0, c_to_f(val))
+
+    # ── High of X°F (single point → ±3°F band) ───────────────────
+    m = re.search(r'high\s+(?:of\s+|temperature[:\s]+)?(-?\d+\.?\d*)\s*°?f', q)
+    if m:
+        val = float(m.group(1))
+        return val - 3.0, val + 3.0
+
     return None, None
 
 def city_from_question(q):
+    """
+    Find by fra question-tekst.
+    Kræver weather-keyword for at filtrere sports-markeder fra
+    (fx 'New York Yankees' og 'Seattle Mariners').
+    """
     ql = q.lower()
+    WEATHER_KW = [
+        "temperature", "degrees", "°f", "°c", "fahrenheit", "celsius",
+        "high", "low", "above", "below", "between", "weather",
+        "warm", "cold", "reach", "exceed", "hotter", "cooler"
+    ]
+    if not any(kw in ql for kw in WEATHER_KW):
+        return None
     for city, cfg in CITIES.items():
         if cfg["polymarket_name"] in ql:
             return city
@@ -917,14 +977,22 @@ def log_new_markets(conn, markets, ts, dt):
                 pass
 
         try:
+            # Hent nuværende pris fra seneste orderbook snapshot
+            book_row = conn.execute("""
+                SELECT implied_prob FROM poly_weather_books
+                WHERE condition_id = ?
+                ORDER BY ts DESC LIMIT 1
+            """, (cid,)).fetchone()
+            initial_prob = float(book_row[0]) if book_row and book_row[0] is not None else None
+
             conn.execute(
                 "INSERT OR IGNORE INTO market_discovery_log "
                 "(ts,dt,condition_id,city,question,temp_low,temp_high,"
                 " resolution_date,initial_implied_prob,initial_volume,hours_before_resolution)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (ts, dt, cid, city, question, tl_f, th_f, res_date,
-                 None, float(m.get("volume",0) or 0), hours_left))
-            log.info(f"  NYET marked: {city} | {question[:60]} ({hours_left}h til resolution)")
+                 initial_prob, float(m.get("volume",0) or 0), hours_left))
+            log.info(f"  NYT marked: {city} | {question[:60]} | prob={initial_prob} ({hours_left}h)")
             new_count += 1
         except Exception as e:
             log.warning(f"  Discovery log fejl: {e}")
@@ -1084,6 +1152,123 @@ def resolve_outcomes(conn):
 
 # ─── HOVED-LOOP ───────────────────────────────────────────────────────
 
+def backfill_temp_bands(conn):
+    """
+    Retroaktivt: genparser temp_low/temp_high for alle markeder hvor det er NULL.
+    Opdaterer også forecast_in_band i forecast_drift tabellen.
+    Kør én gang efter deploy af fix.
+    """
+    # ── 1. Fix poly_weather_markets ───────────────────────────────
+    missing = conn.execute("""
+        SELECT condition_id, question FROM poly_weather_markets
+        WHERE temp_low IS NULL OR temp_high IS NULL
+    """).fetchall()
+
+    fixed_markets = 0
+    for cid, question in missing:
+        tl_f, th_f = parse_temp_band(question)
+        if tl_f is not None:
+            conn.execute("""
+                UPDATE poly_weather_markets
+                SET temp_low=?, temp_high=?, temp_low_c=?, temp_high_c=?
+                WHERE condition_id=?
+            """, (tl_f, th_f, f_to_c(tl_f), f_to_c(th_f) if th_f < 900 else None, cid))
+            fixed_markets += 1
+
+    # ── 2. Fix poly_weather_outcomes ──────────────────────────────
+    missing_out = conn.execute("""
+        SELECT o.condition_id, o.city, o.resolution_date,
+               m.temp_low, m.temp_high, o.actual_temp_f
+        FROM poly_weather_outcomes o
+        JOIN poly_weather_markets m ON o.condition_id = m.condition_id
+        WHERE o.resolved_yes IS NULL AND o.actual_temp_f IS NOT NULL
+          AND m.temp_low IS NOT NULL
+    """).fetchall()
+
+    fixed_outcomes = 0
+    for cid, city, res_date, tl_f, th_f, actual_f in missing_out:
+        if tl_f is None or actual_f is None:
+            continue
+        if th_f > 900:
+            resolved_yes = 1 if actual_f >= tl_f else 0
+        else:
+            resolved_yes = 1 if tl_f <= actual_f <= th_f else 0
+        conn.execute("""
+            UPDATE poly_weather_outcomes SET resolved_yes=? WHERE condition_id=?
+        """, (resolved_yes, cid))
+        fixed_outcomes += 1
+
+    # ── 3. Fix forecast_drift: genberegn forecast_in_band ─────────
+    fixed_drift = 0
+    drift_missing = conn.execute("""
+        SELECT f.rowid, f.condition_id, f.noaa_forecast_temp_f, f.om_forecast_temp_f,
+               m.temp_low, m.temp_high, f.implied_prob
+        FROM forecast_drift f
+        JOIN poly_weather_markets m ON f.condition_id = m.condition_id
+        WHERE f.forecast_in_band IS NULL
+          AND m.temp_low IS NOT NULL
+          AND (f.noaa_forecast_temp_f IS NOT NULL OR f.om_forecast_temp_f IS NOT NULL)
+        LIMIT 50000
+    """).fetchall()
+
+    updates = []
+    for rowid, cid, noaa_f, om_f, tl_f, th_f, implied in drift_missing:
+        best_f = noaa_f if noaa_f is not None else om_f
+        if best_f is None or tl_f is None: continue
+        in_band = (tl_f <= best_f <= th_f) if th_f < 900 else (best_f >= tl_f)
+        fib = 1 if in_band else 0
+        edge = round(abs(fib - implied), 4) if implied is not None else None
+        updates.append((fib, edge, rowid))
+        fixed_drift += 1
+
+    if updates:
+        conn.executemany(
+            "UPDATE forecast_drift SET forecast_in_band=?, edge=? WHERE rowid=?",
+            updates
+        )
+
+    # ── 4. Fix market_discovery_log: sports-markeder ──────────────
+    sports_deleted = conn.execute("""
+        DELETE FROM market_discovery_log
+        WHERE condition_id IN (
+            SELECT condition_id FROM poly_weather_markets WHERE temp_low IS NULL
+        )
+        AND question NOT LIKE '%temperature%'
+        AND question NOT LIKE '%degrees%'
+        AND question NOT LIKE '%°f%'
+        AND question NOT LIKE '%°c%'
+        AND question NOT LIKE '%fahrenheit%'
+        AND question NOT LIKE '%above%'
+        AND question NOT LIKE '%below%'
+        AND question NOT LIKE '%between%'
+        AND question NOT LIKE '%weather%'
+    """).rowcount
+
+    # ── 5. Fix market_discovery_log: initial_implied_prob ─────────
+    discovery_missing = conn.execute("""
+        SELECT d.condition_id FROM market_discovery_log d
+        WHERE d.initial_implied_prob IS NULL
+    """).fetchall()
+
+    fixed_discovery = 0
+    for (cid,) in discovery_missing:
+        # Hent første orderbook snapshot
+        row = conn.execute("""
+            SELECT implied_prob FROM poly_weather_books
+            WHERE condition_id = ? ORDER BY ts ASC LIMIT 1
+        """, (cid,)).fetchone()
+        if row and row[0] is not None:
+            conn.execute("""
+                UPDATE market_discovery_log SET initial_implied_prob=? WHERE condition_id=?
+            """, (row[0], cid))
+            fixed_discovery += 1
+
+    conn.commit()
+    log.info(f"  Backfill: {fixed_markets} markets, {fixed_outcomes} outcomes, "
+             f"{fixed_drift} drift rækker, {sports_deleted} sports slettet, "
+             f"{fixed_discovery} discovery priser")
+    return fixed_markets, fixed_outcomes, fixed_drift
+
 def harvest_once(conn):
     ts, dt = now_ts(), now_dt()
     log.info(f"─── Harvest cycle: {dt} UTC ───")
@@ -1152,6 +1337,13 @@ def run_harvester():
             conn = sqlite3.connect(DB_PATH, timeout=20)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=10000")
+
+            # Kør backfill første gang (idempotent — gør ingenting hvis alt er OK)
+            if not getattr(run_harvester, "_backfill_done", False):
+                log.info("  Kører backfill af eksisterende data...")
+                backfill_temp_bands(conn)
+                run_harvester._backfill_done = True
+
             harvest_once(conn)
         except KeyboardInterrupt:
             log.info("Stoppet af bruger."); break
