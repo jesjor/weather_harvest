@@ -428,10 +428,16 @@ def fetch_weather_markets():
 
 def save_weather_markets(conn, markets):
     ts, dt, saved = now_ts(), now_dt(), 0
+    skipped_no_city = 0
     for m in markets:
-        question = m.get("question", "")
+        # Polymarket kan bruge question, title eller description
+        question = (m.get("question") or m.get("title") or m.get("description") or "").strip()
         city = city_from_question(question)
-        if not city: continue
+        if not city:
+            skipped_no_city += 1
+            if skipped_no_city <= 3:
+                log.info(f"    Skip (ingen match): '{question[:100]}'")
+            continue
 
         cid    = m.get("conditionId") or m.get("id", "")
         tokens = m.get("clobTokenIds", [])
@@ -471,6 +477,8 @@ def save_weather_markets(conn, markets):
         except Exception as e:
             log.warning(f"    Market save fejl: {e}")
     conn.commit()
+    if skipped_no_city > 0:
+        log.info(f"  save_weather_markets: {saved} gemt, {skipped_no_city} sprunget over (ingen by/weather match)")
     return saved
 
 # ─── POLYMARKET CLOB ORDERBOOKS ───────────────────────────────────────
@@ -1165,6 +1173,7 @@ def backfill_temp_bands(conn):
     """).fetchall()
 
     fixed_markets = 0
+    unparseable = []
     for cid, question in missing:
         tl_f, th_f = parse_temp_band(question)
         if tl_f is not None:
@@ -1174,6 +1183,14 @@ def backfill_temp_bands(conn):
                 WHERE condition_id=?
             """, (tl_f, th_f, f_to_c(tl_f), f_to_c(th_f) if th_f < 900 else None, cid))
             fixed_markets += 1
+        else:
+            unparseable.append(question)
+
+    # Log de første 5 questions vi ikke kan parse — kritisk for debugging
+    for q in unparseable[:5]:
+        log.info(f"  Backfill UNPARSEABLE: '{q[:120]}'")
+    if len(unparseable) > 5:
+        log.info(f"  ... og {len(unparseable)-5} flere")
 
     # ── 2. Fix poly_weather_outcomes ──────────────────────────────
     missing_out = conn.execute("""
