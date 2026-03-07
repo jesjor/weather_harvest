@@ -369,24 +369,45 @@ def parse_temp_band(question):
         val = float(m.group(1))
         return val - 3.0, val + 3.0
 
+    # ── Format: "highest temperature in NYC on March 7: above 45°F" ──
+    # Kolonformat hvor temp-betingelsen er efter kolon
+    if ":" in q:
+        after_colon = q.split(":", 1)[1]
+        tl, th = parse_temp_band(after_colon)
+        if tl is not None:
+            return tl, th
+
     return None, None
 
 def city_from_question(q):
     """
     Find by fra question-tekst.
-    Kræver weather-keyword for at filtrere sports-markeder fra
-    (fx 'New York Yankees' og 'Seattle Mariners').
+    Matcher både 'new york', 'nyc', 'new york city' etc.
+    Kræver temperature-keyword for at filtrere sports fra.
     """
     ql = q.lower()
+
     WEATHER_KW = [
         "temperature", "degrees", "°f", "°c", "fahrenheit", "celsius",
         "high", "low", "above", "below", "between", "weather",
-        "warm", "cold", "reach", "exceed", "hotter", "cooler"
+        "warm", "cold", "reach", "exceed", "hotter", "cooler", "highest"
     ]
     if not any(kw in ql for kw in WEATHER_KW):
         return None
-    for city, cfg in CITIES.items():
-        if cfg["polymarket_name"] in ql:
+
+    # Udvid by-matching med aliasser
+    CITY_ALIASES = {
+        "NYC":      ["new york", "nyc", "new york city"],
+        "Chicago":  ["chicago"],
+        "Dallas":   ["dallas"],
+        "Seattle":  ["seattle"],
+        "Atlanta":  ["atlanta"],
+        "Miami":    ["miami"],
+        "Toronto":  ["toronto"],
+        "London":   ["london"],
+    }
+    for city, aliases in CITY_ALIASES.items():
+        if any(alias in ql for alias in aliases):
             return city
     return None
 
@@ -407,153 +428,93 @@ def parse_res_date(question, end_date):
             return f"{yr}-{mm}-{day:02d}"
     return end_date[:10] if end_date and len(end_date) >= 10 else None
 
-def find_weather_tag_id():
+def fetch_weather_markets():
     """
-    Find det korrekte Polymarket tag ID for weather markets.
-    Prøver kendte IDs og validerer ved at se om vi får weather-spørgsmål tilbage.
+    Henter weather temperature markets fra Polymarket.
+    Søger direkte på slug-keywords da tag/category endpoints er upålidelige.
+    Weather markets har slugs som:
+      'will-the-high-temperature-in-chicago-be-above-40f-on-march-8'
+      'will-new-york-city-high-temperature-exceed-50f-march-7'
     """
-    # Kendte kandidat-IDs (weather relaterede)
-    candidates = [
-        (100381, "original"),
-        (100214, "weather-candidate-1"),
-        (100215, "weather-candidate-2"),
-        (1369,   "weather-v2"),
-        (1370,   "temperature"),
-        (100400, "climate"),
-    ]
-    weather_kw = ["temperature","degrees","°f","°c","high","fahrenheit","celsius","above","below","weather"]
+    markets = []
+    seen = set()
 
-    for tag_id, name in candidates:
+    # Søgeord der identificerer temperature markets i slug
+    # Format: 'highest-temperature-in-[city]-on-[date]'
+    search_terms = [
+        "highest-temperature-in-new-york",
+        "highest-temperature-in-chicago",
+        "highest-temperature-in-dallas",
+        "highest-temperature-in-seattle",
+        "highest-temperature-in-atlanta",
+        "highest-temperature-in-miami",
+        "highest-temperature-in-toronto",
+        "highest-temperature-in-london",
+        "highest-temperature-in-nyc",
+        # Fallback bredere søgning
+        "highest-temperature",
+    ]
+
+    for term in search_terms:
         try:
             r = SESSION.get(f"{GAMMA_BASE}/markets",
-                params={"tag_id": tag_id, "active": "true", "limit": 5}, timeout=10)
+                params={
+                    "active":        "true",
+                    "closed":        "false",
+                    "slug_contains": term,
+                    "limit":         100,
+                }, timeout=TIMEOUT)
             if r.status_code != 200:
                 continue
             batch = r.json()
             if not batch:
                 continue
-            # Tjek om svarene indeholder weather-spørgsmål
-            weather_count = sum(
-                1 for m in batch
-                if any(kw in (m.get("question","") + m.get("description","")).lower()
-                       for kw in weather_kw)
-            )
-            if weather_count >= 2:
-                log.info(f"  Weather tag fundet: ID={tag_id} ({name}), {weather_count}/5 weather markets")
-                return tag_id
-            else:
-                sample = batch[0].get("question","")[:60] if batch else ""
-                log.debug(f"  Tag {tag_id} ({name}): ikke weather — '{sample}'")
-        except Exception as e:
-            log.debug(f"  Tag {tag_id} fejl: {e}")
-
-    # Fallback: søg via tags endpoint
-    try:
-        r = SESSION.get(f"{GAMMA_BASE}/tags", params={"limit": 500}, timeout=10)
-        if r.status_code == 200:
-            tags = r.json()
-            for t in tags:
-                label = str(t.get("label","") + t.get("slug","")).lower()
-                if any(k in label for k in ["weather","temperature","climat"]):
-                    tag_id = t.get("id")
-                    log.info(f"  Weather tag via tags endpoint: ID={tag_id} label='{t.get('label')}'")
-                    return tag_id
-    except Exception as e:
-        log.debug(f"  Tags endpoint fejl: {e}")
-
-    log.warning("  Kunne ikke finde weather tag — bruger slug-søgning som fallback")
-    return None
-
-
-def fetch_weather_markets():
-    """
-    Henter weather markets fra Polymarket.
-    Prøver tag-baseret søgning og falder tilbage på slug-søgning.
-    """
-    # ── Metode 1: tag_id søgning ──────────────────────────────────
-    tag_id = find_weather_tag_id()
-    markets_by_tag = []
-    if tag_id:
-        offset, limit = 0, 100
-        while True:
-            try:
-                r = SESSION.get(f"{GAMMA_BASE}/markets",
-                    params={"tag_id": tag_id, "active": "true", "closed": "false",
-                            "limit": limit, "offset": offset}, timeout=TIMEOUT)
-                r.raise_for_status()
-                batch = r.json()
-                if not batch: break
-                markets_by_tag.extend(batch)
-                if len(batch) < limit: break
-                offset += limit
-                time.sleep(0.3)
-            except Exception as e:
-                log.error(f"  Weather markets (tag) fejl: {e}")
-                break
-
-    # ── Metode 2: Søg på weather slugs for vores byer ─────────────
-    # Polymarket weather market slugs følger mønsteret:
-    # will-high-temperature-[city]-[condition]-[date]
-    city_slug_keywords = {
-        "NYC":      ["new-york", "nyc"],
-        "Chicago":  ["chicago"],
-        "Dallas":   ["dallas"],
-        "Seattle":  ["seattle"],
-        "Atlanta":  ["atlanta"],
-        "Miami":    ["miami"],
-        "Toronto":  ["toronto"],
-        "London":   ["london"],
-    }
-    weather_slug_kw = ["temperature", "high-temp", "degrees", "fahrenheit", "celsius", "weather"]
-
-    markets_by_slug = []
-    for city, slug_kw in city_slug_keywords.items():
-        for kw in slug_kw[:1]:  # Kun første keyword per by for at spare API-kald
-            try:
-                r = SESSION.get(f"{GAMMA_BASE}/markets",
-                    params={"slug_contains": kw, "active": "true",
-                            "closed": "false", "limit": 50}, timeout=TIMEOUT)
-                if r.status_code != 200:
-                    continue
-                batch = r.json()
-                # Filtrer til weather markets
-                for m in batch:
-                    q = (m.get("question","") + m.get("slug","") + m.get("description","")).lower()
-                    if any(wk in q for wk in weather_slug_kw):
-                        markets_by_slug.append(m)
-                time.sleep(0.2)
-            except Exception as e:
-                log.debug(f"  Slug search {kw}: {e}")
-
-    # ── Metode 3: Direkte category søgning ───────────────────────
-    markets_by_cat = []
-    for cat in ["weather", "climate", "temperature"]:
-        try:
-            r = SESSION.get(f"{GAMMA_BASE}/markets",
-                params={"category": cat, "active": "true",
-                        "closed": "false", "limit": 100}, timeout=TIMEOUT)
-            if r.status_code == 200:
-                batch = r.json()
-                if batch:
-                    markets_by_cat.extend(batch)
-                    log.info(f"  Category '{cat}': {len(batch)} markeder")
+            added = 0
+            for m in batch:
+                cid = m.get("conditionId") or m.get("id", "")
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    markets.append(m)
+                    added += 1
+            if added:
+                log.info(f"  slug '{term}': {added} markeder")
             time.sleep(0.2)
         except Exception as e:
-            log.debug(f"  Category {cat}: {e}")
+            log.debug(f"  slug search '{term}': {e}")
 
-    # ── Kombiner og deduplikér ─────────────────────────────────────
-    all_markets = markets_by_tag + markets_by_slug + markets_by_cat
-    seen = set()
-    unique = []
-    for m in all_markets:
-        cid = m.get("conditionId") or m.get("id","")
-        if cid and cid not in seen:
-            seen.add(cid)
-            unique.append(m)
+    # Hvis slug-søgning gav 0 resultater, prøv question_contains
+    if not markets:
+        log.info("  Slug-søgning gav 0 — prøver question_contains...")
+        for q_term in ["high temperature", "fahrenheit", "degrees fahrenheit"]:
+            try:
+                r = SESSION.get(f"{GAMMA_BASE}/markets",
+                    params={
+                        "active":            "true",
+                        "closed":            "false",
+                        "question_contains": q_term,
+                        "limit":             200,
+                    }, timeout=TIMEOUT)
+                if r.status_code == 200:
+                    batch = r.json()
+                    for m in batch:
+                        cid = m.get("conditionId") or m.get("id", "")
+                        if cid and cid not in seen:
+                            seen.add(cid)
+                            markets.append(m)
+                    if batch:
+                        log.info(f"  question_contains '{q_term}': {len(batch)} markeder")
+                time.sleep(0.3)
+            except Exception as e:
+                log.debug(f"  question_contains '{q_term}': {e}")
 
-    log.info(f"  fetch_weather_markets: tag={len(markets_by_tag)} slug={len(markets_by_slug)} "
-             f"cat={len(markets_by_cat)} → {len(unique)} unikke")
-    return unique
+    if markets:
+        # Log et sample så vi kan verificere at vi har de rigtige markeder
+        sample_q = markets[0].get("question", "")[:80]
+        log.info(f"  fetch_weather_markets: {len(markets)} unikke — sample: '{sample_q}'")
+    else:
+        log.warning("  fetch_weather_markets: 0 markeder fundet! Tjek Polymarket API adgang.")
+
+    return markets
 
 def save_weather_markets(conn, markets):
     ts, dt, saved = now_ts(), now_dt(), 0
