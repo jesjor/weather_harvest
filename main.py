@@ -303,14 +303,46 @@ def get_nws_grid(city):
 def parse_temp_band(question):
     """
     Parser temperatur-band fra Polymarket weather question.
-    Understøtter alle kendte formater: °F, °C, 'degrees', og enhedsløse tal.
+    Understøtter alle kendte formater inkl. dash: "between 34-37°F", "be 10°C", "be 12°C on"
     """
     import re
     q = question.lower()
 
     def is_fahrenheit(val):
-        # Heuristik: hvis tal > 40 er det sandsynligvis Fahrenheit
         return val > 40
+
+    # ── DASH FORMAT: "between X-Y°F" (Polymarket's primære format) ─
+    m = re.search(r'between\s+(-?\d+)-(\d+)\s*°?f', q)
+    if m: return float(m.group(1)), float(m.group(2))
+
+    m = re.search(r'between\s+(-?\d+)-(\d+)\s*°?c', q)
+    if m: return c_to_f(float(m.group(1))), c_to_f(float(m.group(2)))
+
+    # ── "X°F or higher/above" og "X°F or below/lower" ────────────
+    # Disse SKAL komme FØR "be X°F" for at undgå fejlmatch
+    m = re.search(r'(-?\d+\.?\d*)\s*°?f\s+or\s+(?:higher|above)', q)
+    if m: return float(m.group(1)), 999.0
+
+    m = re.search(r'(-?\d+\.?\d*)\s*°?c\s+or\s+(?:higher|above)', q)
+    if m: return c_to_f(float(m.group(1))), 999.0
+
+    m = re.search(r'(-?\d+\.?\d*)\s*°?f\s+or\s+(?:below|lower)', q)
+    if m: return -999.0, float(m.group(1))
+
+    m = re.search(r'(-?\d+\.?\d*)\s*°?c\s+or\s+(?:below|lower)', q)
+    if m: return -999.0, c_to_f(float(m.group(1)))
+
+    # ── EXACT CELSIUS: "be 10°c on" (single degree → ±0.5°C band) ─
+    m = re.search(r'\bbe\s+(-?\d+)\s*°c\b', q)
+    if m:
+        val_c = float(m.group(1))
+        return c_to_f(val_c - 0.5), c_to_f(val_c + 0.5)
+
+    # ── EXACT FAHRENHEIT: "be 45°f on" (single degree → ±0.5°F) ──
+    m = re.search(r'\bbe\s+(-?\d+)\s*°f\b', q)
+    if m:
+        val = float(m.group(1))
+        return val - 0.5, val + 0.5
 
     # ── Between X and Y °F (fx "between 75°F and 85°F") ──────────
     m = re.search(r'between\s+(-?\d+\.?\d*)\s*°?f\s+and\s+(-?\d+\.?\d*)\s*°?f', q)
@@ -320,13 +352,13 @@ def parse_temp_band(question):
     m = re.search(r'between\s+(-?\d+\.?\d*)\s*°?c\s+and\s+(-?\d+\.?\d*)\s*°?c', q)
     if m: return c_to_f(float(m.group(1))), c_to_f(float(m.group(2)))
 
-    # ── Between X and Y degrees Fahrenheit/Celsius ───────────────
-    m = re.search(r'between\s+(-?\d+\.?\d*)\s+and\s+(-?\d+\.?\d*)\s*degrees?\s*(fahrenheit|celsius|f\b|c\b)?', q)
+    # ── Between X and Y degrees ──────────────────────────────────
+    m = re.search(r'between\s+(-?\d+\.?\d*)\s+and\s+(-?\d+\.?\d*)\s*degrees?\s*(fahrenheit|celsius)?', q)
     if m:
         lo, hi = float(m.group(1)), float(m.group(2))
-        unit = (m.group(3) or "").strip()
-        if unit.startswith("c") and not unit.startswith("f"): return c_to_f(lo), c_to_f(hi)
-        if unit.startswith("f") or "fahrenheit" in q or is_fahrenheit(hi): return lo, hi
+        unit = (m.group(3) or "")
+        if unit == "celsius": return c_to_f(lo), c_to_f(hi)
+        if unit == "fahrenheit" or is_fahrenheit(hi): return lo, hi
         return c_to_f(lo), c_to_f(hi)
 
     # ── Between X and Y (enhedsløst) ─────────────────────────────
@@ -335,42 +367,31 @@ def parse_temp_band(question):
         lo, hi = float(m.group(1)), float(m.group(2))
         return (lo, hi) if is_fahrenheit(hi) else (c_to_f(lo), c_to_f(hi))
 
-    # ── Above/exceed/reach X °F ───────────────────────────────────
-    m = re.search(r'(?:above|over|exceed|reach|higher than|>)\s+(-?\d+\.?\d*)\s*°?f', q)
+    # ── Above/exceed/reach X°F ────────────────────────────────────
+    m = re.search(r'(?:above|over|exceed|reach|higher than)\s+(-?\d+\.?\d*)\s*°?f', q)
     if m: return float(m.group(1)), 999.0
 
-    # ── Above X °C ───────────────────────────────────────────────
-    m = re.search(r'(?:above|over|exceed|reach|higher than|>)\s+(-?\d+\.?\d*)\s*°?c', q)
+    m = re.search(r'(?:above|over|exceed|reach|higher than)\s+(-?\d+\.?\d*)\s*°?c', q)
     if m: return c_to_f(float(m.group(1))), 999.0
 
-    # ── Above X degrees (enhedsløst) ─────────────────────────────
     m = re.search(r'(?:above|over|exceed|reach|higher than)\s+(-?\d+\.?\d*)\s*degrees?', q)
     if m:
         val = float(m.group(1))
         return (val, 999.0) if is_fahrenheit(val) else (c_to_f(val), 999.0)
 
-    # ── Below X °F ───────────────────────────────────────────────
-    m = re.search(r'(?:below|under|lower than|<)\s+(-?\d+\.?\d*)\s*°?f', q)
+    # ── Below X°F ────────────────────────────────────────────────
+    m = re.search(r'(?:below|under|lower than)\s+(-?\d+\.?\d*)\s*°?f', q)
     if m: return -999.0, float(m.group(1))
 
-    # ── Below X °C ───────────────────────────────────────────────
-    m = re.search(r'(?:below|under|lower than|<)\s+(-?\d+\.?\d*)\s*°?c', q)
+    m = re.search(r'(?:below|under|lower than)\s+(-?\d+\.?\d*)\s*°?c', q)
     if m: return -999.0, c_to_f(float(m.group(1)))
 
-    # ── Below X degrees ──────────────────────────────────────────
     m = re.search(r'(?:below|under|lower than)\s+(-?\d+\.?\d*)\s*degrees?', q)
     if m:
         val = float(m.group(1))
         return (-999.0, val) if is_fahrenheit(val) else (-999.0, c_to_f(val))
 
-    # ── High of X°F (single point → ±3°F band) ───────────────────
-    m = re.search(r'high\s+(?:of\s+|temperature[:\s]+)?(-?\d+\.?\d*)\s*°?f', q)
-    if m:
-        val = float(m.group(1))
-        return val - 3.0, val + 3.0
-
-    # ── Format: "highest temperature in NYC on March 7: above 45°F" ──
-    # Kolonformat hvor temp-betingelsen er efter kolon
+    # ── Kolonformat: "highest temp in NYC: above 45°F" ────────────
     if ":" in q:
         after_colon = q.split(":", 1)[1]
         tl, th = parse_temp_band(after_colon)
@@ -1390,12 +1411,16 @@ def harvest_once(conn):
     log.info("  Polymarket: scanner weather markets...")
     markets = fetch_weather_markets()
     saved_m = save_weather_markets(conn, markets)
-    new_m   = log_new_markets(conn, markets, ts, dt)
-    log.info(f"  Polymarket: {len(markets)} hentet, {saved_m} gemt, {new_m} nye")
+    log.info(f"  Polymarket: {len(markets)} hentet, {saved_m} gemt")
 
-    # 2. Orderbooks for alle aktive markets
+    # 2. Orderbooks FØRST — så initial_implied_prob kan hentes ved log_new_markets
     log.info("  Polymarket: henter orderbooks...")
     harvest_orderbooks(conn)
+
+    # 3. Log nye markets — nu med initial_implied_prob fra netop hentede orderbooks
+    new_m = log_new_markets(conn, markets, ts, dt)
+    if new_m:
+        log.info(f"  Polymarket: {new_m} nye markets opdaget")
 
     # 3. Vejrdata
     for city, cfg in CITIES.items():
