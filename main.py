@@ -431,90 +431,96 @@ def parse_res_date(question, end_date):
 def fetch_weather_markets():
     """
     Henter weather temperature markets fra Polymarket.
-    Søger direkte på slug-keywords da tag/category endpoints er upålidelige.
-    Weather markets har slugs som:
-      'will-the-high-temperature-in-chicago-be-above-40f-on-march-8'
-      'will-new-york-city-high-temperature-exceed-50f-march-7'
+    Bruger /events/pagination?tag_slug= — det korrekte endpoint.
     """
     markets = []
     seen = set()
 
-    # Søgeord der identificerer temperature markets i slug
-    # Format: 'highest-temperature-in-[city]-on-[date]'
-    search_terms = [
-        "highest-temperature-in-new-york",
-        "highest-temperature-in-chicago",
-        "highest-temperature-in-dallas",
-        "highest-temperature-in-seattle",
-        "highest-temperature-in-atlanta",
-        "highest-temperature-in-miami",
-        "highest-temperature-in-toronto",
-        "highest-temperature-in-london",
-        "highest-temperature-in-nyc",
-        # Fallback bredere søgning
-        "highest-temperature",
-    ]
-
-    for term in search_terms:
-        try:
-            r = SESSION.get(f"{GAMMA_BASE}/markets",
-                params={
-                    "active":        "true",
-                    "closed":        "false",
-                    "slug_contains": term,
-                    "limit":         100,
-                }, timeout=TIMEOUT)
-            if r.status_code != 200:
-                continue
-            batch = r.json()
-            if not batch:
-                continue
-            added = 0
-            for m in batch:
+    def extract_markets(events):
+        added = 0
+        for ev in (events or []):
+            for m in ev.get("markets", []):
                 cid = m.get("conditionId") or m.get("id", "")
                 if cid and cid not in seen:
                     seen.add(cid)
                     markets.append(m)
                     added += 1
-            if added:
-                log.info(f"  slug '{term}': {added} markeder")
+        return added
+
+    # ── Metode 1: events/pagination med kendte weather tag slugs ──
+    weather_tag_slugs = ["weather", "temperature", "climate", "daily-temperature",
+                         "weather-forecast", "temp", "meteorology"]
+    for tag_slug in weather_tag_slugs:
+        try:
+            r = SESSION.get(f"{GAMMA_BASE}/events/pagination",
+                params={"limit": 100, "active": "true", "archived": "false",
+                        "closed": "false", "tag_slug": tag_slug,
+                        "order": "volume24hr", "ascending": "false", "offset": 0},
+                timeout=TIMEOUT)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            # Pagination response: {"data": [...], "count": N} eller direkte liste
+            events = data.get("data", data) if isinstance(data, dict) else data
+            n = extract_markets(events)
+            if n:
+                log.info(f"  tag_slug='{tag_slug}': {n} markets")
+                # Hent eventuelle næste sider
+                offset = 100
+                while n == 100:
+                    r2 = SESSION.get(f"{GAMMA_BASE}/events/pagination",
+                        params={"limit": 100, "active": "true", "archived": "false",
+                                "closed": "false", "tag_slug": tag_slug,
+                                "order": "volume24hr", "ascending": "false", "offset": offset},
+                        timeout=TIMEOUT)
+                    if r2.status_code != 200: break
+                    data2 = r2.json()
+                    events2 = data2.get("data", data2) if isinstance(data2, dict) else data2
+                    n = extract_markets(events2)
+                    offset += 100
             time.sleep(0.2)
         except Exception as e:
-            log.debug(f"  slug search '{term}': {e}")
+            log.debug(f"  tag_slug={tag_slug}: {e}")
 
-    # Hvis slug-søgning gav 0 resultater, prøv question_contains
+    # ── Metode 2: Direkte event slug-opslag per by+dato ───────────
     if not markets:
-        log.info("  Slug-søgning gav 0 — prøver question_contains...")
-        for q_term in ["high temperature", "fahrenheit", "degrees fahrenheit"]:
-            try:
-                r = SESSION.get(f"{GAMMA_BASE}/markets",
-                    params={
-                        "active":            "true",
-                        "closed":            "false",
-                        "question_contains": q_term,
-                        "limit":             200,
-                    }, timeout=TIMEOUT)
-                if r.status_code == 200:
-                    batch = r.json()
-                    for m in batch:
-                        cid = m.get("conditionId") or m.get("id", "")
-                        if cid and cid not in seen:
-                            seen.add(cid)
-                            markets.append(m)
-                    if batch:
-                        log.info(f"  question_contains '{q_term}': {len(batch)} markeder")
-                time.sleep(0.3)
-            except Exception as e:
-                log.debug(f"  question_contains '{q_term}': {e}")
+        log.info("  tag_slug gav 0 — prøver direkte event slug-opslag...")
+        city_slug_map = {
+            "NYC":     ["nyc", "new-york-city"],
+            "Chicago": ["chicago"], "Dallas": ["dallas"], "Seattle": ["seattle"],
+            "Atlanta": ["atlanta"], "Miami":  ["miami"],  "Toronto": ["toronto"],
+            "London":  ["london"],
+        }
+        month_names = ["january","february","march","april","may","june",
+                       "july","august","september","october","november","december"]
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+        for days_ahead in range(-2, 14):
+            target = now_utc + datetime.timedelta(days=days_ahead)
+            date_str = f"{month_names[target.month-1]}-{target.day}-{target.year}"
+            for city, city_slugs in city_slug_map.items():
+                for city_slug in city_slugs:
+                    slug = f"highest-temperature-in-{city_slug}-on-{date_str}"
+                    try:
+                        r = SESSION.get(f"{GAMMA_BASE}/events",
+                            params={"slug": slug}, timeout=TIMEOUT)
+                        if r.status_code == 200:
+                            data = r.json()
+                            evs = data if isinstance(data, list) else [data]
+                            n = extract_markets(evs)
+                            if n: break  # Fandt den — næste by
+                        time.sleep(0.05)
+                    except Exception as e:
+                        log.debug(f"  event slug {slug}: {e}")
 
     if markets:
-        # Log et sample så vi kan verificere at vi har de rigtige markeder
-        sample_q = markets[0].get("question", "")[:80]
-        log.info(f"  fetch_weather_markets: {len(markets)} unikke — sample: '{sample_q}'")
+        sample = markets[0].get("question","") or markets[0].get("title","")
+        log.info(f"  fetch_weather_markets: {len(markets)} markeder — sample: '{sample[:80]}'")
     else:
-        log.warning("  fetch_weather_markets: 0 markeder fundet! Tjek Polymarket API adgang.")
+        log.warning("  fetch_weather_markets: 0 markeder fundet — tjek tag_slug i Railway logs")
 
     return markets
+
 
 def save_weather_markets(conn, markets):
     ts, dt, saved = now_ts(), now_dt(), 0
