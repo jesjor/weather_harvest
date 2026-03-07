@@ -941,34 +941,44 @@ def export_csv():
 
 def _get_forecast_for_date(conn, city, resolution_date, source):
     """
-    Henter den seneste forecast for en specifik dato for en given by.
-    Bruges til at beregne om forecast falder indenfor et temperature-band.
+    Henter forventet MAX temperatur for resolution_date for en given by.
+    Bruger seneste forecast (højeste ts) der dækker den pågældende dato.
     Returnerer (temp_f, temp_c) eller (None, None).
     """
     if source == "noaa":
-        # Soeg efter forecast_hour der matcher resolution_date
+        # Brug MAX forecast temp over alle timer på resolution_date
+        # forecast_hour format: '2026-03-08T14:00:00-08:00' → substr(1,10) = '2026-03-08'
         row = conn.execute("""
-            SELECT temp_f, temp_c FROM noaa_forecast
-            WHERE city = ? AND forecast_hour LIKE ?
-            ORDER BY ts DESC LIMIT 1
-        """, (city, resolution_date + "%")).fetchone()
-        if row: return row[0], row[1]
-        # Fallback: max temp fra griddata
+            SELECT MAX(temp_f), MAX(temp_c) FROM noaa_forecast
+            WHERE city = ?
+              AND substr(forecast_hour, 1, 10) = ?
+        """, (city, resolution_date)).fetchone()
+        if row and row[0] is not None:
+            return row[0], row[1]
+
+        # Fallback: griddata max temp
         row = conn.execute("""
-            SELECT max_temp_c FROM noaa_griddata
-            WHERE city = ? AND valid_time LIKE ?
-            ORDER BY ts DESC LIMIT 1
-        """, (city, resolution_date + "%")).fetchone()
-        if row and row[0]:
-            from main import c_to_f
+            SELECT MAX(max_temp_c) FROM noaa_griddata
+            WHERE city = ?
+              AND substr(valid_time, 1, 10) = ?
+        """, (city, resolution_date)).fetchone()
+        if row and row[0] is not None:
             return c_to_f(row[0]), row[0]
-    else:
-        row = conn.execute("""
-            SELECT temp_c, temp_f FROM openmeteo_forecast
-            WHERE city = ? AND forecast_hour LIKE ?
-            ORDER BY ts DESC LIMIT 1
-        """, (city, resolution_date + "%")).fetchone()
-        if row: return row[1], row[0]
+
+    else:  # open_meteo
+        # Open-Meteo tabel hedder openmeteo_forecast eller open_meteo_forecast
+        for tbl in ("openmeteo_forecast", "open_meteo_forecast", "om_forecast"):
+            try:
+                row = conn.execute(f"""
+                    SELECT MAX(temp_f), MAX(temp_c) FROM {tbl}
+                    WHERE city = ?
+                      AND substr(forecast_hour, 1, 10) = ?
+                """, (city, resolution_date)).fetchone()
+                if row and row[0] is not None:
+                    return row[0], row[1]
+            except Exception:
+                continue
+
     return None, None
 
 def harvest_forecast_drift(conn):
@@ -1361,22 +1371,37 @@ def backfill_temp_bands(conn):
             updates
         )
 
-    # ── 4. Fix market_discovery_log: sports-markeder ──────────────
-    sports_deleted = conn.execute("""
-        DELETE FROM market_discovery_log
-        WHERE condition_id IN (
-            SELECT condition_id FROM poly_weather_markets WHERE temp_low IS NULL
-        )
-        AND question NOT LIKE '%temperature%'
-        AND question NOT LIKE '%degrees%'
-        AND question NOT LIKE '%°f%'
-        AND question NOT LIKE '%°c%'
-        AND question NOT LIKE '%fahrenheit%'
-        AND question NOT LIKE '%above%'
-        AND question NOT LIKE '%below%'
-        AND question NOT LIKE '%between%'
-        AND question NOT LIKE '%weather%'
-    """).rowcount
+    # ── 4. Slet sports-markeder fra ALLE tabeller ─────────────────
+    # Identifikation: temp_low IS NULL OG question har ingen weather-keywords
+    sports_cids = conn.execute("""
+        SELECT condition_id FROM poly_weather_markets
+        WHERE temp_low IS NULL
+          AND question NOT LIKE '%temperature%'
+          AND question NOT LIKE '%degrees%'
+          AND question NOT LIKE '%°f%'
+          AND question NOT LIKE '%°c%'
+          AND question NOT LIKE '%fahrenheit%'
+          AND question NOT LIKE '%above%'
+          AND question NOT LIKE '%below%'
+          AND question NOT LIKE '%between%'
+          AND question NOT LIKE '%weather%'
+          AND question NOT LIKE '%highest%'
+    """).fetchall()
+
+    sports_cid_list = [r[0] for r in sports_cids]
+    sports_deleted = 0
+    if sports_cid_list:
+        placeholders = ",".join("?" * len(sports_cid_list))
+        conn.execute(f"DELETE FROM market_discovery_log WHERE condition_id IN ({placeholders})",
+                     sports_cid_list)
+        conn.execute(f"DELETE FROM forecast_drift WHERE condition_id IN ({placeholders})",
+                     sports_cid_list)
+        conn.execute(f"DELETE FROM poly_weather_books WHERE condition_id IN ({placeholders})",
+                     sports_cid_list)
+        conn.execute(f"DELETE FROM poly_weather_markets WHERE condition_id IN ({placeholders})",
+                     sports_cid_list)
+        sports_deleted = len(sports_cid_list)
+        log.info(f"  Backfill: slettet {sports_deleted} sports-markeder fra alle tabeller")
 
     # ── 5. Fix market_discovery_log: initial_implied_prob ─────────
     discovery_missing = conn.execute("""
