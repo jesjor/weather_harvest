@@ -1288,6 +1288,8 @@ def resolve_outcomes(conn):
         ).total_seconds() / 3600
         if market_closed or hours_since > 36:
             conn.execute("UPDATE poly_weather_markets SET active=0 WHERE condition_id=?", (cid,))
+            if resolved_yes is None and hours_since > 168:  # >7 dage, ingen observation
+                log.info(f"  Force-lukker {city} {res_date} (>7 dage, ingen observation)")
 
     conn.commit()
 
@@ -1466,19 +1468,18 @@ def harvest_once(conn):
         except Exception as e:
             log.error(f"  {city} fejl: {e}", exc_info=True)
 
-    # 4. Forecast drift — spor edge-udvikling over tid for hvert market
+    # 4. Outcome resolver — tjek markets der er passeret resolution_date
+    #    Koeres FØR forecast_drift så udløbne markets er active=0 inden edge-logning
+    try:
+        resolve_outcomes(conn)
+    except Exception as e:
+        log.error(f"  Outcome resolver fejl: {e}", exc_info=True)
+
+    # 5. Forecast drift — spor edge-udvikling over tid for hvert market
     try:
         harvest_forecast_drift(conn)
     except Exception as e:
         log.error(f"  Forecast drift fejl: {e}", exc_info=True)
-
-    # 5. Outcome resolver — tjek markets der er passeret resolution_date
-    #    Koeres kun hvert 30. min da det er tungt og markets resolver ikke minutvis
-    if ts % 1800 < INTERVAL_SEC:
-        try:
-            resolve_outcomes(conn)
-        except Exception as e:
-            log.error(f"  Outcome resolver fejl: {e}", exc_info=True)
 
     log.info("  Cycle komplet")
 
