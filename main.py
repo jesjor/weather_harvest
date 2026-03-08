@@ -1281,8 +1281,12 @@ def resolve_outcomes(conn):
         except Exception as e:
             log.warning(f"  Outcome save fejl ({city}): {e}")
 
-        # Marker markedet som inaktivt hvis det er lukket paa Polymarket
-        if market_closed:
+        # Marker markedet som inaktivt:
+        # enten Polymarket siger lukket, eller markedet er >36 timer udløbet
+        hours_since = (now_utc - datetime.datetime.strptime(
+            res_date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+        ).total_seconds() / 3600
+        if market_closed or hours_since > 36:
             conn.execute("UPDATE poly_weather_markets SET active=0 WHERE condition_id=?", (cid,))
 
     conn.commit()
