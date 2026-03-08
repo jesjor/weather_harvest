@@ -1075,7 +1075,9 @@ def harvest_forecast_drift(conn):
             drift_rows
         )
         conn.commit()
-        high_edge = [(r[3], r[13]) for r in drift_rows if r[13] and r[13] > 0.3]
+        # Kun aktive markets (hours_until_resolution > -6) i edge-logningen
+        high_edge = [(r[3], r[13]) for r in drift_rows
+                     if r[13] and r[13] > 0.3 and r[5] is not None and r[5] > -6]
         log.info(f"  Forecast drift: {len(drift_rows)} markets sporet"
                  + (f" | {len(high_edge)} med edge>30%" if high_edge else ""))
         if high_edge:
