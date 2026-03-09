@@ -1,15 +1,19 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  POLYMARKET WEATHER MARKET HARVESTER                                 ║
+║  POLYMARKET WEATHER MARKET HARVESTER  v2                             ║
 ║  Indsamler data til backtesting af vejr-trading strategier           ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  Datakilder:                                                         ║
 ║  • Polymarket Gamma API: aktive vejr-markets + metadata              ║
 ║  • Polymarket CLOB API: YES/NO orderbook for hvert temperature-band  ║
 ║  • NOAA/NWS API: timeprognoser + observationer (US byer)             ║
-║  • Open-Meteo API: timeprognoser + observationer (Toronto, London)   ║
+║  • Open-Meteo API: sekundær forecast for ALLE byer                   ║
+║  • YR.no (MET Norway): forecast for alle byer (bedst i Europa)       ║
 ║                                                                      ║
-║  Byer: Dallas, NYC, Chicago, Seattle, Atlanta, Miami, Toronto, London║
+║  US:     NYC, Chicago, Dallas, Seattle, Atlanta, Miami,              ║
+║          Los Angeles, Phoenix, Denver, Boston, Houston, Las Vegas    ║
+║  Canada: Toronto                                                     ║
+║  Europe: London, Paris, Berlin, Amsterdam, Madrid, Rome              ║
 ║  Interval: 5 minutter                                                ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
@@ -36,6 +40,7 @@ INTERVAL_SEC = 300  # 5 minutter
 WEATHER_TAG_ID = 100381  # Polymarket weather tag
 
 CITIES = {
+    # ── US BYER (NOAA primær) ─────────────────────────────────────────
     "NYC": {
         "lat": 40.7128, "lon": -74.0060, "source": "noaa",
         "noaa_station": "KNYC", "polymarket_name": "new york",
@@ -66,21 +71,80 @@ CITIES = {
         "noaa_station": "KMIA", "polymarket_name": "miami",
         "timezone": "America/New_York",
     },
+    "Los Angeles": {
+        "lat": 34.0522, "lon": -118.2437, "source": "noaa",
+        "noaa_station": "KLAX", "polymarket_name": "los angeles",
+        "timezone": "America/Los_Angeles",
+    },
+    "Phoenix": {
+        "lat": 33.4484, "lon": -112.0740, "source": "noaa",
+        "noaa_station": "KPHX", "polymarket_name": "phoenix",
+        "timezone": "America/Phoenix",
+    },
+    "Denver": {
+        "lat": 39.7392, "lon": -104.9903, "source": "noaa",
+        "noaa_station": "KDEN", "polymarket_name": "denver",
+        "timezone": "America/Denver",
+    },
+    "Boston": {
+        "lat": 42.3601, "lon": -71.0589, "source": "noaa",
+        "noaa_station": "KBOS", "polymarket_name": "boston",
+        "timezone": "America/New_York",
+    },
+    "Houston": {
+        "lat": 29.7604, "lon": -95.3698, "source": "noaa",
+        "noaa_station": "KHOU", "polymarket_name": "houston",
+        "timezone": "America/Chicago",
+    },
+    "Las Vegas": {
+        "lat": 36.1699, "lon": -115.1398, "source": "noaa",
+        "noaa_station": "KLAS", "polymarket_name": "las vegas",
+        "timezone": "America/Los_Angeles",
+    },
+    # ── CANADA ────────────────────────────────────────────────────────
     "Toronto": {
         "lat": 43.6532, "lon": -79.3832, "source": "open_meteo",
         "polymarket_name": "toronto", "timezone": "America/Toronto",
     },
+    # ── EUROPA (Open-Meteo + YR.no primær) ───────────────────────────
     "London": {
         "lat": 51.5074, "lon": -0.1278, "source": "open_meteo",
-        "polymarket_name": "london", "wu_station": "EGLC",
-        "timezone": "Europe/London",
+        "polymarket_name": "london", "timezone": "Europe/London",
     },
+    "Paris": {
+        "lat": 48.8566, "lon": 2.3522, "source": "open_meteo",
+        "polymarket_name": "paris", "timezone": "Europe/Paris",
+    },
+    "Berlin": {
+        "lat": 52.5200, "lon": 13.4050, "source": "open_meteo",
+        "polymarket_name": "berlin", "timezone": "Europe/Berlin",
+    },
+    "Amsterdam": {
+        "lat": 52.3676, "lon": 4.9041, "source": "open_meteo",
+        "polymarket_name": "amsterdam", "timezone": "Europe/Amsterdam",
+    },
+    "Madrid": {
+        "lat": 40.4168, "lon": -3.7038, "source": "open_meteo",
+        "polymarket_name": "madrid", "timezone": "Europe/Madrid",
+    },
+    "Rome": {
+        "lat": 41.9028, "lon": 12.4964, "source": "open_meteo",
+        "polymarket_name": "rome", "timezone": "Europe/Rome",
+    },
+}
+
+# Hvilke byer der også hentes YR.no forecast for (primært Europa + global)
+YR_CITIES = {
+    "London", "Paris", "Berlin", "Amsterdam", "Madrid", "Rome", "Toronto",
+    "NYC", "Chicago", "Dallas", "Seattle", "Atlanta", "Miami",
+    "Los Angeles", "Phoenix", "Denver", "Boston", "Houston", "Las Vegas",
 }
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE  = "https://clob.polymarket.com"
 NWS_BASE   = "https://api.weather.gov"
 OM_BASE    = "https://api.open-meteo.com/v1"
+YR_BASE    = "https://api.met.no/weatherapi/locationforecast/2.0"
 TIMEOUT    = 15
 
 # ─── LOGGING ──────────────────────────────────────────────────────────
@@ -208,6 +272,22 @@ def init_db():
         PRIMARY KEY (ts, city)
     )""")
 
+    # YR.no forecast tabel (Norsk Meteorologisk Institutt)
+    c.execute("""CREATE TABLE IF NOT EXISTS yr_forecast (
+        ts INTEGER, dt TEXT, city TEXT, forecast_hour TEXT,
+        temp_c REAL, temp_f REAL,
+        feels_like_c REAL,
+        wind_speed REAL,             -- m/s
+        wind_direction REAL,
+        wind_gusts REAL,
+        humidity REAL,               -- %
+        precip_1h REAL,              -- mm/t
+        cloud_cover REAL,            -- %
+        pressure REAL,               -- hPa
+        symbol_code TEXT,            -- vejr-symbol (clearsky_day osv.)
+        PRIMARY KEY (ts, city, forecast_hour)
+    )""")
+
     # Udvidet outcomes tabel — inkl. faktisk temperatur og forecast-præcision
     c.execute("""CREATE TABLE IF NOT EXISTS poly_weather_outcomes (
         condition_id TEXT PRIMARY KEY,
@@ -263,6 +343,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_books_cid  ON poly_weather_books(condition_id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_noaa_fc    ON noaa_forecast(city,forecast_hour)",
         "CREATE INDEX IF NOT EXISTS idx_om_fc      ON openmeteo_forecast(city,forecast_hour)",
+        "CREATE INDEX IF NOT EXISTS idx_yr_fc      ON yr_forecast(city,forecast_hour)",
         "CREATE INDEX IF NOT EXISTS idx_obs        ON noaa_observations(city,ts)",
         "CREATE INDEX IF NOT EXISTS idx_drift_cid  ON forecast_drift(condition_id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_drift_city ON forecast_drift(city,resolution_date)",
@@ -850,6 +931,61 @@ def harvest_open_meteo(conn, city):
         conn.commit()
         log.info(f"  {city} Open-Meteo forecast: {len(rows)} timer gemt")
 
+
+def harvest_yr(conn, city):
+    """
+    Henter forecast fra YR.no (Norsk Meteorologisk Institutt).
+    Verdens mest præcise forecast-kilde, særligt stærk i Europa.
+    API: https://api.met.no/weatherapi/locationforecast/2.0/compact
+    Krav: User-Agent header med kontaktinfo (MET Norway krav).
+    """
+    ts, dt = now_ts(), now_dt()
+    cfg = CITIES[city]
+    try:
+        r = SESSION.get(
+            f"{YR_BASE}/compact",
+            params={"lat": round(cfg["lat"], 4), "lon": round(cfg["lon"], 4)},
+            headers={"User-Agent": "PolymarketWeatherHarvester/2.0 github.com/weather-harvest"},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.warning(f"  YR.no fejl ({city}): {e}")
+        return
+
+    timeseries = data.get("properties", {}).get("timeseries", [])
+    rows = []
+    for entry in timeseries[:48]:
+        fh = entry.get("time", "")[:16].replace("T", " ")  # "2026-03-09 14:00"
+        instant = entry.get("data", {}).get("instant", {}).get("details", {})
+        next1h  = entry.get("data", {}).get("next_1_hours", {})
+        summary = next1h.get("summary", {})
+        details = next1h.get("details", {})
+
+        tc = instant.get("air_temperature")
+        rows.append((
+            ts, dt, city, fh,
+            tc, c_to_f(tc),
+            instant.get("wind_speed"),
+            instant.get("wind_from_direction"),
+            instant.get("wind_speed_of_gust"),
+            instant.get("relative_humidity"),
+            details.get("precipitation_amount"),
+            instant.get("cloud_area_fraction"),
+            instant.get("air_pressure_at_sea_level"),
+            summary.get("symbol_code"),
+        ))
+
+    if rows:
+        conn.executemany("""INSERT OR REPLACE INTO yr_forecast
+            (ts,dt,city,forecast_hour,temp_c,temp_f,
+             wind_speed,wind_direction,wind_gusts,humidity,
+             precip_1h,cloud_cover,pressure,symbol_code)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+        conn.commit()
+        log.info(f"  {city} YR.no forecast: {len(rows)} timer gemt")
+
 # ─── DOWNLOAD SERVER ──────────────────────────────────────────────────
 
 def start_download_server():
@@ -941,45 +1077,53 @@ def export_csv():
 
 def _get_forecast_for_date(conn, city, resolution_date, source):
     """
-    Henter forventet MAX temperatur for resolution_date for en given by.
-    Bruger seneste forecast (højeste ts) der dækker den pågældende dato.
-    Returnerer (temp_f, temp_c) eller (None, None).
+    Henter forventet MAX temperatur for resolution_date.
+    Returnerer (noaa_f, noaa_c, om_f, om_c, yr_f, yr_c).
     """
+    noaa_f = noaa_c = om_f = om_c = yr_f = yr_c = None
+
+    # ── NOAA (US byer) ────────────────────────────────────────────────
     if source == "noaa":
-        # Brug MAX forecast temp over alle timer på resolution_date
-        # forecast_hour format: '2026-03-08T14:00:00-08:00' → substr(1,10) = '2026-03-08'
         row = conn.execute("""
             SELECT MAX(temp_f), MAX(temp_c) FROM noaa_forecast
-            WHERE city = ?
-              AND substr(forecast_hour, 1, 10) = ?
+            WHERE city = ? AND substr(forecast_hour, 1, 10) = ?
         """, (city, resolution_date)).fetchone()
         if row and row[0] is not None:
-            return row[0], row[1]
+            noaa_f, noaa_c = row[0], row[1]
+        else:
+            row = conn.execute("""
+                SELECT MAX(max_temp_c) FROM noaa_griddata
+                WHERE city = ? AND substr(valid_time, 1, 10) = ?
+            """, (city, resolution_date)).fetchone()
+            if row and row[0] is not None:
+                noaa_c = row[0]
+                noaa_f = c_to_f(row[0])
 
-        # Fallback: griddata max temp
+    # ── Open-Meteo (alle byer) ────────────────────────────────────────
+    for tbl in ("openmeteo_forecast", "open_meteo_forecast", "om_forecast"):
+        try:
+            row = conn.execute(f"""
+                SELECT MAX(temp_f), MAX(temp_c) FROM {tbl}
+                WHERE city = ? AND substr(forecast_hour, 1, 10) = ?
+            """, (city, resolution_date)).fetchone()
+            if row and row[0] is not None:
+                om_f, om_c = row[0], row[1]
+                break
+        except Exception:
+            continue
+
+    # ── YR.no (alle byer) ─────────────────────────────────────────────
+    try:
         row = conn.execute("""
-            SELECT MAX(max_temp_c) FROM noaa_griddata
-            WHERE city = ?
-              AND substr(valid_time, 1, 10) = ?
+            SELECT MAX(temp_f), MAX(temp_c) FROM yr_forecast
+            WHERE city = ? AND substr(forecast_hour, 1, 10) = ?
         """, (city, resolution_date)).fetchone()
         if row and row[0] is not None:
-            return c_to_f(row[0]), row[0]
+            yr_f, yr_c = row[0], row[1]
+    except Exception:
+        pass
 
-    else:  # open_meteo
-        # Open-Meteo tabel hedder openmeteo_forecast eller open_meteo_forecast
-        for tbl in ("openmeteo_forecast", "open_meteo_forecast", "om_forecast"):
-            try:
-                row = conn.execute(f"""
-                    SELECT MAX(temp_f), MAX(temp_c) FROM {tbl}
-                    WHERE city = ?
-                      AND substr(forecast_hour, 1, 10) = ?
-                """, (city, resolution_date)).fetchone()
-                if row and row[0] is not None:
-                    return row[0], row[1]
-            except Exception:
-                continue
-
-    return None, None
+    return noaa_f, noaa_c, om_f, om_c, yr_f, yr_c
 
 def harvest_forecast_drift(conn):
     """
@@ -1025,33 +1169,27 @@ def harvest_forecast_drift(conn):
             except Exception:
                 pass
 
-        # Hent forecast for resolution-dagen
+        # Hent forecast for resolution-dagen — alle 3 kilder
         cfg = CITIES.get(city, {})
         src = cfg.get("source", "noaa")
 
-        noaa_tf = noaa_tc = om_tc = om_tf = None
+        noaa_tf, noaa_tc, om_tf, om_tc, yr_tf, yr_tc = \
+            _get_forecast_for_date(conn, city, res_date, src)
 
-        if src == "noaa":
-            noaa_tf, noaa_tc = _get_forecast_for_date(conn, city, res_date, "noaa")
-            # Hent ogsaa Open-Meteo som second opinion for US byer
-            om_tc_row = conn.execute("""
-                SELECT temp_c, temp_f FROM openmeteo_forecast
-                WHERE city = ? AND forecast_hour LIKE ?
-                ORDER BY ts DESC LIMIT 1
-            """, (city, (res_date or "") + "%")).fetchone()
-            if om_tc_row:
-                om_tc, om_tf = om_tc_row
-        else:
-            om_tf, om_tc = _get_forecast_for_date(conn, city, res_date, "open_meteo")
-
-        # Er forecast temperaturen inden for temp-band?
+        # Er forecast inden for temp-band? Brug bedste tilgængelige kilde
+        # Prioritet: NOAA > YR.no > Open-Meteo
         forecast_in_band = None
-        best_fc_f = noaa_tf or om_tf
+        best_fc_f = noaa_tf or yr_tf or om_tf
         if best_fc_f is not None and tl_f is not None and th_f is not None:
-            in_band = (tl_f <= best_fc_f <= th_f) if th_f < 900 else (best_fc_f >= tl_f)
+            if th_f >= 900:
+                in_band = best_fc_f >= tl_f
+            elif tl_f <= -900:
+                in_band = best_fc_f <= th_f
+            else:
+                in_band = tl_f <= best_fc_f <= th_f
             forecast_in_band = 1 if in_band else 0
 
-        # Edge: afstand mellem forecast-sandsynlighed og market-pris
+        # Edge
         edge = None
         if forecast_in_band is not None and implied is not None:
             edge = round(abs(forecast_in_band - implied), 4)
@@ -1455,7 +1593,7 @@ def harvest_once(conn):
     if new_m:
         log.info(f"  Polymarket: {new_m} nye markets opdaget")
 
-    # 3. Vejrdata
+    # 3. Vejrdata — alle kilder for alle byer
     for city, cfg in CITIES.items():
         try:
             if cfg["source"] == "noaa":
@@ -1464,7 +1602,23 @@ def harvest_once(conn):
                 if ts % 1800 < INTERVAL_SEC:
                     harvest_noaa_griddata(conn, city)
             else:
+                # Toronto + europæiske byer: Open-Meteo som primær
                 harvest_open_meteo(conn, city)
+
+            # Open-Meteo som sekundær kilde for ALLE byer (inkl. US)
+            if cfg["source"] == "noaa":
+                try:
+                    harvest_open_meteo(conn, city)
+                except Exception as e:
+                    log.debug(f"  {city} Open-Meteo sekundær fejl: {e}")
+
+            # YR.no for alle byer i YR_CITIES
+            if city in YR_CITIES:
+                try:
+                    harvest_yr(conn, city)
+                except Exception as e:
+                    log.debug(f"  {city} YR.no fejl: {e}")
+
         except Exception as e:
             log.error(f"  {city} fejl: {e}", exc_info=True)
 
@@ -1485,11 +1639,16 @@ def harvest_once(conn):
 
 def run_harvester():
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  WEATHER MARKET HARVESTER STARTET                 ║")
-    log.info(f"║  Byer:     {', '.join(CITIES.keys()):<40}║")
-    log.info(f"║  Interval: {INTERVAL_SEC}s (5 min)                          ║")
+    log.info("║  WEATHER MARKET HARVESTER v2 STARTET              ║")
+    log.info(f"║  Byer:     {len(CITIES)} byer tracket{' '*29}║")
+    log.info(f"║  Kilder:   NOAA + Open-Meteo + YR.no{' '*14}║")
+    log.info(f"║  Interval: {INTERVAL_SEC}s (5 min){' '*30}║")
     log.info(f"║  Database: {str(DB_PATH):<40}║")
     log.info("╚═══════════════════════════════════════════════════╝")
+    log.info(f"  US byer:  NYC, Chicago, Dallas, Seattle, Atlanta, Miami,")
+    log.info(f"            Los Angeles, Phoenix, Denver, Boston, Houston, Las Vegas")
+    log.info(f"  Canada:   Toronto")
+    log.info(f"  Europa:   London, Paris, Berlin, Amsterdam, Madrid, Rome")
 
     if os.environ.get("ENABLE_DOWNLOAD","").lower() == "true":
         threading.Thread(target=start_download_server, daemon=True).start()
